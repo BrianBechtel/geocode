@@ -1,0 +1,10 @@
+# 排除虚拟环境
+.venv
+# 排除本地配置
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.db
+.DS_Store
+.env
