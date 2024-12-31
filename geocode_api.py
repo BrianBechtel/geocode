@@ -1,31 +1,21 @@
 # -*- coding:utf-8 -*-
-# @Author: H
-# @Date: 2024-07-08 10:56:04
-# @Version: 1.1
-# @License: H
-# @Desc: FastAPI Implementation
-
-import os
-import geopandas as gpd
-from shapely.geometry import Point
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
+from shapely.geometry import Point
+import geopandas as gpd
+import os
 
-app = FastAPI()
+
+# 定义请求数据模型
+class Coordinates(BaseModel):
+    longitude: float = Field(..., description="经度，范围 -180 到 180", ge=-180, le=180)
+    latitude: float = Field(..., description="纬度，范围 -90 到 90", ge=-90, le=90)
+
 
 class GeoCoder:
-    _instance = None
-
-    def __new__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super(GeoCoder, cls).__new__(cls, *args, **kwargs)
-        return cls._instance
-
     def __init__(self, cache=True):
         self.cache = cache
         self.geo_gdf = {}
-
-        # Load GeoJSON data file
         self.DIR_BASE = os.path.dirname(os.path.abspath(__file__))
         self.base_gdf = gpd.read_file(os.path.join(self.DIR_BASE, 'geodata', 'china.json'))
 
@@ -41,24 +31,20 @@ class GeoCoder:
         path = os.path.join(self.DIR_BASE, 'geodata', type, f'{code}.json')
         if not os.path.exists(path):
             return None
+        if self.cache and code in self.geo_gdf:
+            return self.geo_gdf[code]
+        gdf = gpd.read_file(path)
         if self.cache:
-            if code in self.geo_gdf:
-                return self.geo_gdf[code]
-            else:
-                gdf = gpd.read_file(path)
-                self.geo_gdf[code] = gdf
-                return gdf
-        else:
-            return gpd.read_file(path)
+            self.geo_gdf[code] = gdf
+        return gdf
 
     def point_to_location(self, longitude, latitude):
-        prov_name, prov_code, city_name, city_code, district_name, district_code = '', '', '', '', '', ''
         try:
-            longitude, latitude = float(longitude), float(latitude)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f'Invalid latitude or longitude: {longitude}, {latitude}')
+            point = Point(longitude, latitude)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"无效的点: {str(e)}")
 
-        point = Point(longitude, latitude)
+        prov_name, prov_code, city_name, city_code, district_name, district_code = '', '', '', '', '', ''
         prov_df = self.get_point_df(self.base_gdf, point)
         if prov_df is not None:
             prov_code = str(prov_df['adcode'])
@@ -80,6 +66,8 @@ class GeoCoder:
                     district_df = self.get_point_df(district_gdf, point)
                     district_name = district_df['name'] if district_df is not None else ''
                     district_code = district_df['adcode'] if district_df is not None else ''
+        else:
+            raise HTTPException(status_code=404, detail="未找到该点的地理位置")
 
         return {
             'prov_name': prov_name,
@@ -90,19 +78,32 @@ class GeoCoder:
             'district_code': district_code
         }
 
-# Initialize GeoCoder instance
-g = GeoCoder()
 
-class Coordinates(BaseModel):
-    longitude: float
-    latitude: float
+# 创建 FastAPI 应用
+app = FastAPI()
+geocoder = GeoCoder()
 
-@app.post("/geocode")
-async def geocode_location(coords: Coordinates):
-    result = g.point_to_location(coords.longitude, coords.latitude)
-    return result
 
-@app.get("/geocode")
-async def geocode_location_get(longitude: float = Query(...), latitude: float = Query(...)):
-    result = g.point_to_location(longitude, latitude)
-    return result
+@app.post("/geocode", summary="根据经纬度获取地理位置信息")
+async def geocode_post(coordinates: Coordinates):
+    try:
+        result = geocoder.point_to_location(coordinates.longitude, coordinates.latitude)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+
+
+@app.get("/geocode", summary="根据经纬度获取地理位置信息 (GET)")
+async def geocode_get(
+        longitude: float = Query(..., ge=-180, le=180, description="经度，范围 -180 到 180"),
+        latitude: float = Query(..., ge=-90, le=90, description="纬度，范围 -90 到 90")
+):
+    try:
+        result = geocoder.point_to_location(longitude, latitude)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
